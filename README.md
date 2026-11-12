@@ -103,7 +103,7 @@ syntax errors only.
 
 The host is Flywheel ([solenoid.fw](solenoid.fw)): it serves the editor and answers its
 requests for files, running programs, diagnostics, formatting, packages, and the console (the
-[driveshaft](https://github.com/pmorphia/driveshaft) library). `solenoid desktop` shows it in
+`driveshaft` library, `polymorphia.driveshaft`). `solenoid desktop` shows it in
 a `desktop.window`; `solenoid serve` in a browser. The editor itself (`web/`) is HTML, CSS,
 and JavaScript on [CodeMirror 6](https://codemirror.net): an editing surface has to handle
 every keystroke in the page, which a Flywheel desktop window (it re-renders its tree after

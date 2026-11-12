@@ -797,7 +797,10 @@ end
 
 private function prepare(string root, int port, string address)
     host.home = find_home()
-    host.root = fs.absolute(root)
+    host.root = fs.normalize(fs.absolute(root))
+    while host.root.length > 1 and host.root.ends_with("/") do
+        host.root = host.root.slice(0, host.root.length - 1)
+    end
     host.compiler = driveshaft.find_compiler()
     host.config_file = config_path()
     host.port = port
