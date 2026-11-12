@@ -1,0 +1,17 @@
+[package]
+name = "solenoid"
+author = "polymorphia"
+version = "1.0.0"
+description = "A smart IDE for Flywheel and general development, in a window or the browser"
+main = "solenoid.fw"
+license = "MIT"
+exclude = ["tests/*", "tools/*", ".gitignore"]
+
+[dependencies]
+driveshaft = "polymorphia.driveshaft=^1.0"
+
+[scripts]
+test = "flywheel test tests/"
+
+[commands]
+solenoid = "cli.fw"

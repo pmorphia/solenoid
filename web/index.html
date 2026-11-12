@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Solenoid</title>
+<meta name="description" content="Solenoid: a smart IDE for Flywheel and general development. Runs in the browser and on your machine.">
+<meta name="theme-color" content="#08080a">
+<link rel="icon" href="logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div class="app" id="app">
+  <header class="titlebar">
+    <button class="brand" id="brand" title="All commands">
+      <span class="wheel" id="wheel"><img src="logo.png" alt=""></span>
+      <span class="brand-name">Solenoid</span>
+    </button>
+    <button class="project" id="project" title="Project"></button>
+    <button class="finder" id="finder"><span class="finder-icon" data-icon="search"></span><span>Go to file, command, or symbol</span><kbd id="finder-key">Ctrl P</kbd></button>
+    <div class="run-group">
+      <button class="btn acc" id="run" title="Run the open file"><span data-icon="play"></span><span id="run-label">Run</span></button>
+      <button class="btn danger" id="stop" title="Stop" hidden><span data-icon="stop"></span>Stop</button>
+      <button class="btn ghost" id="test" title="Run the tests"><span data-icon="flask"></span>Test</button>
+    </div>
+    <button class="icon-btn" id="toggle-browser" title="Browser"><span data-icon="globe"></span></button>
+    <button class="icon-btn" id="open-settings" title="Settings (solenoid.cw)"><span data-icon="gear"></span></button>
+  </header>
+
+  <div class="main">
+    <nav class="activity" id="activity">
+      <button data-view="files" title="Files"><span data-icon="files"></span></button>
+      <button data-view="search" title="Search in files"><span data-icon="search"></span></button>
+      <button data-view="pulley" title="Pulley packages"><span data-icon="package"></span></button>
+      <button data-view="outline" title="Outline"><span data-icon="outline"></span></button>
+      <div class="activity-space"></div>
+      <button data-action="console" title="Driveshaft console"><span data-icon="terminal"></span></button>
+    </nav>
+
+    <aside class="sidebar" id="sidebar">
+      <section class="side-view" data-view="files">
+        <header><span class="side-title" id="files-title">Files</span>
+          <span class="side-actions">
+            <button id="new-file" title="New file"><span data-icon="file-plus"></span></button>
+            <button id="new-folder" title="New folder"><span data-icon="folder-plus"></span></button>
+            <button id="refresh-files" title="Refresh"><span data-icon="refresh"></span></button>
+          </span>
+        </header>
+        <div class="tree" id="tree" tabindex="0"></div>
+      </section>
+      <section class="side-view" data-view="search" hidden>
+        <header><span class="side-title">Search</span></header>
+        <div class="search-box">
+          <input id="search-input" type="text" placeholder="Search in files" spellcheck="false" autocomplete="off">
+          <label class="check"><input type="checkbox" id="search-case"> Match case</label>
+        </div>
+        <div class="search-results" id="search-results"></div>
+      </section>
+      <section class="side-view" data-view="pulley" hidden>
+        <header><span class="side-title">Pulley</span>
+          <span class="side-actions"><button id="pulley-refresh" title="Refresh"><span data-icon="refresh"></span></button></span>
+        </header>
+        <div class="pulley" id="pulley"></div>
+      </section>
+      <section class="side-view" data-view="outline" hidden>
+        <header><span class="side-title">Outline</span></header>
+        <div class="outline" id="outline"></div>
+      </section>
+    </aside>
+    <div class="splitter col" data-split="sidebar"></div>
+
+    <section class="center">
+      <div class="work" id="work">
+        <div class="editor-col">
+          <div class="tabs" id="tabs"></div>
+          <div class="crumbs" id="crumbs"></div>
+          <div class="editor-host">
+            <div id="editor"></div>
+            <div class="welcome" id="welcome"></div>
+            <div class="preview-note" id="binary-note" hidden></div>
+          </div>
+        </div>
+        <div class="splitter col" data-split="browser" id="browser-splitter" hidden></div>
+        <div class="browser" id="browser" hidden>
+          <div class="browser-bar">
+            <button id="browser-back" title="Back"><span data-icon="left"></span></button>
+            <button id="browser-forward" title="Forward"><span data-icon="right"></span></button>
+            <button id="browser-reload" title="Reload"><span data-icon="refresh"></span></button>
+            <input id="browser-url" type="text" spellcheck="false" autocomplete="off" placeholder="Address">
+            <button id="browser-external" title="Open in your browser"><span data-icon="external"></span></button>
+            <button id="browser-close" title="Close"><span data-icon="x"></span></button>
+          </div>
+          <div class="browser-view">
+            <div class="browser-progress" id="browser-progress"></div>
+            <iframe id="browser-frame" title="Browser" referrerpolicy="no-referrer"></iframe>
+            <div class="browser-empty" id="browser-empty"></div>
+          </div>
+        </div>
+      </div>
+      <div class="splitter row" data-split="panel" id="panel-splitter"></div>
+      <div class="panel" id="panel">
+        <div class="panel-tabs">
+          <button data-panel="output">Output</button>
+          <button data-panel="problems">Problems <span class="count" id="problem-count" hidden></span></button>
+          <button data-panel="console">Console</button>
+          <button data-panel="terminal" id="terminal-tab">Terminal</button>
+          <div class="panel-space"></div>
+          <span class="panel-info" id="panel-info"></span>
+          <button class="panel-btn" id="panel-clear" title="Clear"><span data-icon="clear"></span></button>
+          <button class="panel-btn" id="panel-close" title="Hide"><span data-icon="x"></span></button>
+        </div>
+        <div class="panel-body" data-panel="output">
+          <div class="log" id="output" tabindex="0"></div>
+          <div class="stdin" id="stdin-row" hidden><span class="prompt">›</span><input id="stdin" type="text" spellcheck="false" autocomplete="off" placeholder="Type input for the program and press Enter"></div>
+        </div>
+        <div class="panel-body" data-panel="problems" hidden><div class="problems" id="problems"></div></div>
+        <div class="panel-body" data-panel="console" hidden>
+          <div class="log" id="console-log" tabindex="0"></div>
+          <div class="console-input"><span class="prompt" id="console-prompt">fw›</span><div id="console-editor"></div>
+            <select id="console-mode" title="What a top-level return does"><option value="serve">return → browser</option><option value="run">return → reset</option></select>
+          </div>
+        </div>
+        <div class="panel-body" data-panel="terminal" hidden>
+          <div class="log" id="terminal-log" tabindex="0"></div>
+          <div class="stdin"><span class="prompt" id="terminal-prompt">$</span><input id="terminal-input" type="text" spellcheck="false" autocomplete="off" placeholder="Run a command in the project"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <footer class="status" id="status">
+    <button class="status-item" id="status-branch" hidden></button>
+    <button class="status-item" id="status-problems"></button>
+    <span class="status-item quiet" id="status-message"></span>
+    <span class="status-space"></span>
+    <button class="status-item" id="status-position"></button>
+    <button class="status-item" id="status-indent"></button>
+    <button class="status-item" id="status-language"></button>
+    <button class="status-item" id="status-sound" title="Sounds"></button>
+    <button class="status-item" id="status-motion" title="Animations"></button>
+    <span class="status-item quiet" id="status-host"></span>
+  </footer>
+</div>
+
+<div class="overlay" id="palette" hidden>
+  <div class="palette-box">
+    <input id="palette-input" type="text" spellcheck="false" autocomplete="off">
+    <div class="palette-list" id="palette-list"></div>
+    <div class="palette-foot"><span><kbd>↑↓</kbd> move</span><span><kbd>Enter</kbd> open</span><span><kbd>&gt;</kbd> commands</span><span><kbd>@</kbd> symbols</span><span><kbd>:</kbd> line</span></div>
+  </div>
+</div>
+<div class="overlay" id="dialog" hidden><div class="dialog-box" id="dialog-box"></div></div>
+<div class="menu" id="menu" hidden></div>
+<div class="toasts" id="toasts"></div>
+
+<script src="vendor/codemirror.js"></script>
+<script src="js/cogwheel.js"></script>
+<script src="js/flywheel-lang.js"></script>
+<script src="js/samples.js"></script>
+<script src="js/hosts.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

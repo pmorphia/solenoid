@@ -1,0 +1,5 @@
+# The solenoid command (`pulley install polymorphia.solenoid`):
+#   solenoid [desktop|serve] [DIRECTORY or FILE] [--port N] [--host H] [--no-open]
+import solenoid
+import os
+return solenoid.main(os.args())

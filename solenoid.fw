@@ -1,0 +1,988 @@
+# Solenoid: an IDE for Flywheel and general development.
+#
+# This module is the host: it serves the editor (the files in web/) and answers its requests
+# for files, running programs, diagnostics, packages, and the console. The editor runs in a
+# desktop window (`solenoid`, `solenoid desktop`) or a browser (`solenoid serve`).
+#
+#     import solenoid
+#     return solenoid.main(["serve", "--port", "4747", "my-project"])
+import crypto
+import desktop
+import driveshaft
+import fs
+import html.*
+import json
+import net
+import os
+import thread
+import time
+import toml
+import web
+
+const string VERSION = "1.0.0"
+const int DEFAULT_PORT = 4747
+# Directories left out of file lists and searches.
+const string[] SKIPPED = [".git", "node_modules", ".flywheel-modules", "__pycache__", ".venv", "venv", "target",
+    "dist", ".cache", ".idea", ".vscode"]
+const int MAX_FILE = 4000000
+
+# Settings of one running host.
+class Host
+    # The project directory.
+    string root = ""
+    string token = ""
+    string home = ""
+    string compiler = "flywheel"
+    string config_file = ""
+    string scratch = ""
+    int port = DEFAULT_PORT
+    string address = "127.0.0.1"
+end
+
+# A program started from the editor: its output is appended to `log`, and lines for its
+# standard input to `input`.
+class Job
+    int id
+    int pid
+    string dir
+    string log
+    string input
+    string status_file
+    double started
+end
+
+private Host host = Host()
+private map<int, Job> jobs = {}
+private int next_job = 0
+private map<string, driveshaft.Session> consoles = {}
+private var guard = thread.mutex()
+
+# Paths ----------------------------------------------------------------------------------
+
+function env(string name) returns string
+    return driveshaft.env(name)
+end
+
+# Where this package's files (web/, cli.fw) are: SOLENOID_HOME, the directory of the program
+# `flywheel run` was given, an installed package, or the working directory.
+function find_home() returns string
+    string[] candidates = [env("SOLENOID_HOME")]
+    try
+        var stat = fs.read("/proc/{os.pid()}/stat")
+        var fields = stat.slice(stat.find_last(")") + 2).split(" ")
+        var arguments = fs.read("/proc/{fields[1]}/cmdline").split(string(char(0)))
+        for a in arguments do
+            if a.ends_with(".fw") do
+                candidates.push(fs.dirname(fs.absolute(a)))
+            end
+        end
+    catch Error e
+        # Not Linux: fall through to the other places.
+    end
+    string data = env("XDG_DATA_HOME")
+    if data == "" and env("HOME") != "" do
+        data = fs.join(env("HOME"), ".local", "share")
+    end
+    if data != "" do
+        candidates.push(fs.join(data, "pulley", "installs", "solenoid", ".flywheel-modules", "solenoid"))
+    end
+    if env("LOCALAPPDATA") != "" do
+        candidates.push(fs.join(env("LOCALAPPDATA"), "pulley", "installs", "solenoid", ".flywheel-modules", "solenoid"))
+    end
+    string dir = fs.cwd()
+    while true do
+        candidates.push(fs.join(dir, ".flywheel-modules", "solenoid"))
+        candidates.push(dir)
+        string parent = fs.dirname(dir)
+        if parent == dir or parent == "" do
+            break
+        end
+        dir = parent
+    end
+    for c in candidates do
+        if c != "" and fs.exists(fs.join(c, "web", "index.html")) do
+            return c
+        end
+    end
+    throw FileError("cannot find Solenoid's files (web/index.html); set SOLENOID_HOME to the package directory")
+end
+
+function config_path() returns string
+    string base = env("XDG_CONFIG_HOME")
+    if base == "" do
+        base = env("APPDATA")
+    end
+    if base == "" do
+        base = fs.join(env("HOME"), ".config")
+    end
+    return fs.join(base, "solenoid", "solenoid.cw")
+end
+
+# A path from the editor: absolute, or relative to the project.
+private function resolve(string path) returns string
+    if path == "" or path == "." do
+        return host.root
+    end
+    if path.starts_with("/") or (path.length > 2 and path[1] == ':') do
+        return fs.normalize(path)
+    end
+    return fs.normalize(fs.join(host.root, path))
+end
+
+private function tool(string name) returns bool
+    if fs.exists("/bin/sh") do
+        return os.run(["sh", "-c", "command -v " + name]).status == 0
+    end
+    return os.run(["where", name]).status == 0
+end
+
+private map<string, bool> tools = {}
+
+private function has(string name) returns bool
+    if not (name in tools) do
+        tools[name] = tool(name)
+    end
+    return tools[name]
+end
+
+# JSON ------------------------------------------------------------------------------------
+
+private function text_of(json.value body, string key, string fallback = "") returns string
+    if json.has(body, key) and json.kind(body[key]) == "string" do
+        return json.as_string(body[key])
+    end
+    return fallback
+end
+
+private function int_of(json.value body, string key, int fallback = 0) returns int
+    if json.has(body, key) and json.kind(body[key]) == "number" do
+        return json.as_int(body[key])
+    end
+    return fallback
+end
+
+private function bool_of(json.value body, string key) returns bool
+    return json.has(body, key) and json.kind(body[key]) == "bool" and json.as_bool(body[key])
+end
+
+private function list_of(json.value body, string key) returns string[]
+    string[] out = []
+    if json.has(body, key) and json.kind(body[key]) == "array" do
+        for item in json.items(body[key]) do
+            out.push(json.as_string(item))
+        end
+    end
+    return out
+end
+
+private function reply(string body, int status = 200) returns web.response
+    var r = web.json(body, status)
+    r.headers["cache-control"] = "no-store"
+    return r
+end
+
+private function failure(string message, int status = 400) returns web.response
+    return reply(json.encode({"error": message}), status)
+end
+
+private function q(string text) returns string
+    return json.encode(text)
+end
+
+# Files -----------------------------------------------------------------------------------
+
+class Entry
+    string name
+    bool dir
+    int size
+end
+
+private function list_directory(string path) returns string
+    Entry[] folders = []
+    Entry[] files = []
+    for name in fs.list(path) do
+        string full = fs.join(path, name)
+        if fs.is_dir(full) do
+            folders.push(Entry(name, true, 0))
+        else do
+            int size = 0
+            try
+                size = fs.size(full)
+            catch FileError e
+                size = 0
+            end
+            files.push(Entry(name, false, size))
+        end
+    end
+    folders.extend(files)
+    return json.encode(folders)
+end
+
+# Every file below `dir` (relative paths), leaving out SKIPPED directories.
+private function collect(string dir, string prefix, string[] out, int limit) returns void
+    if out.length >= limit do
+        return
+    end
+    string[] names = []
+    try
+        names = fs.list(dir)
+    catch FileError e
+        return
+    end
+    for name in names do
+        if out.length >= limit do
+            return
+        end
+        string full = fs.join(dir, name)
+        string relative = name if prefix == "" else prefix + "/" + name
+        if fs.is_dir(full) do
+            if not (name in SKIPPED) and not name.starts_with("build") do
+                collect(full, relative, out, limit)
+            end
+        else do
+            out.push(relative)
+        end
+    end
+end
+
+private function looks_binary(string text) returns bool
+    return text.slice(0, 4000).contains(string(char(0)))
+end
+
+class Match
+    string path
+    int line
+    int column
+    string text
+end
+
+private function search(string query, bool match_case, int limit) returns string
+    Match[] found = []
+    string[] files = []
+    collect(host.root, "", files, 20000)
+    string needle = query if match_case else query.lower()
+    bool more = false
+    for file in files do
+        string full = fs.join(host.root, file)
+        try
+            if fs.size(full) > 1500000 do
+                continue
+            end
+            string text = fs.read(full)
+            string hay = text if match_case else text.lower()
+            if not hay.contains(needle) or looks_binary(text) do
+                continue
+            end
+            var lines = text.lines()
+            var hay_lines = hay.lines()
+            for i, line in hay_lines do
+                int at = line.find(needle)
+                if at >= 0 do
+                    if found.length >= limit do
+                        more = true
+                        break
+                    end
+                    found.push(Match(file, i + 1, at + 1, lines[i].trim().slice(0, 240)))
+                end
+            end
+        catch Error e
+            continue
+        end
+        if more do
+            break
+        end
+    end
+    return "{{\"matches\":" + json.encode(found) + ",\"more\":" + json.encode(more) + "}}"
+end
+
+# Programs --------------------------------------------------------------------------------
+
+private function quote(string text) returns string
+    string tick = string(char(39))
+    return tick + text.replace(tick, tick + string(char(92)) + tick + tick) + tick
+end
+
+# Starts a command (an argument list) or a shell line in `dir`. Returns the job.
+private function start_job(string[] command, string shell, string dir, map<string, string> variables) returns Job
+    guard.lock()
+    next_job += 1
+    int id = next_job
+    guard.unlock()
+    string base = fs.join(host.scratch, "job-{id}")
+    var job = Job(id, 0, dir, base + ".log", base + ".in", base + ".status", time.now())
+    fs.write(job.log, "")
+    fs.write(job.input, "")
+    if fs.exists("/bin/sh") do
+        string line = shell
+        if line == "" do
+            line = command.map(function(string part) => quote(part)).join(" ")
+            if has("stdbuf") do
+                line = "stdbuf -oL -eL " + line
+            end
+        end
+        string fifo = base + ".fifo"
+        # The program reads the lines appended to the input file; its exit status is kept.
+        string script = "cd " + quote(dir) + " || exit 1; mkfifo " + quote(fifo) + " && ( tail -n +1 -f " + quote(job.input) + " > " + quote(fifo) + " 2>/dev/null & echo $! > " + quote(base + ".tail") + " ); "
+        script += "( " + line + " ) < " + quote(fifo) + "; status=$?; kill $(cat " + quote(base + ".tail") + ") 2>/dev/null; echo $status > " + quote(job.status_file)
+        string[] argv = ["sh", "-c", script]
+        if has("setsid") do
+            argv = ["setsid", "sh", "-c", script]
+        end
+        var p = os.process(argv)
+        p.env["PYTHONUNBUFFERED"] = "1"
+        p.env["FORCE_COLOR"] = "0"
+        p.env["NO_COLOR"] = "1"
+        for key, value in variables do
+            p.env[key] = value
+        end
+        job.pid = p.start(job.log)
+    else do
+        string[] argv = command
+        if shell != "" do
+            argv = ["cmd.exe", "/d", "/s", "/c", shell]
+        end
+        var p = os.process(argv)
+        p.cwd = dir
+        for key, value in variables do
+            p.env[key] = value
+        end
+        job.pid = p.start(job.log)
+    end
+    guard.lock()
+    jobs[id] = job
+    guard.unlock()
+    return job
+end
+
+private function job_state(Job job, int offset) returns string
+    bool alive = os.alive(job.pid)
+    string text = fs.read(job.log)
+    int status = 0
+    if not alive do
+        string saved = fs.read(job.status_file).trim() if fs.exists(job.status_file) else ""
+        int waited = os.wait(job.pid)
+        status = int(saved) if saved != "" else (waited if waited >= 0 else 128 - waited)
+    end
+    int total = text.length
+    string fresh = text.slice(offset) if offset < total else ""
+    if fresh.length > 400000 do
+        fresh = "[... output shortened ...]\n" + fresh.slice(fresh.length - 300000)
+    end
+    return "{{\"text\":" + q(fresh) + ",\"offset\":{total},\"alive\":" + json.encode(alive) + ",\"status\":{status},\"seconds\":{time.now() - job.started:.3f}}}"
+end
+
+private function stop_job(Job job)
+    if os.alive(job.pid) do
+        os.kill(job.pid)
+        time.sleep 0.15
+        if os.alive(job.pid) do
+            os.kill(job.pid, 9)
+        end
+    end
+end
+
+function stop_all()
+    for id, job in jobs do
+        stop_job(job)
+    end
+    for name, session in consoles do
+        session.close()
+    end
+    if host.scratch != "" and fs.exists(host.scratch) do
+        fs.remove_all(host.scratch)
+    end
+end
+
+# Diagnostics -----------------------------------------------------------------------------
+
+class Problem
+    string path
+    int line
+    int column
+    string severity
+    string message
+end
+
+# Reads `file:line:col: error: message` lines, as the Flywheel compiler writes them.
+function parse_problems(string output, string own) returns Problem[]
+    Problem[] found = []
+    for line in output.lines() do
+        var parts = line.split(":")
+        if parts.length < 5 do
+            if line.starts_with("Flywheel") or line.contains("error") do
+                continue
+            end
+            continue
+        end
+        # The path may itself contain a colon (C:\...), so read the fields from the right side
+        # of the first two numbers.
+        int k = 1
+        while k + 2 < parts.length and not (is_number(parts[k]) and is_number(parts[k + 1])) do
+            k += 1
+        end
+        if k + 2 >= parts.length do
+            continue
+        end
+        string path = parts.slice(0, k).join(":")
+        string severity = parts[k + 2].trim()
+        if severity != "error" and severity != "warning" and severity != "note" do
+            continue
+        end
+        string message = parts.slice(k + 3).join(":").trim()
+        if path == "<source>" do
+            path = own
+        end
+        found.push(Problem(path, int(parts[k]), int(parts[k + 1]), severity, message))
+    end
+    return found
+end
+
+private function is_number(string text) returns bool
+    if text == "" or text.length > 9 do
+        return false
+    end
+    for c in text.chars() do
+        if c < '0' or c > '9' do
+            return false
+        end
+    end
+    return true
+end
+
+private function check(string path, string text, string language) returns string
+    Problem[] found = []
+    string dir = fs.dirname(path) if path != "" else host.root
+    if not fs.is_dir(dir) do
+        dir = host.root
+    end
+    if language == "flywheel" do
+        var p = os.process([host.compiler, "check", "-s", text])
+        p.cwd = dir
+        p.timeout = 20.0
+        var r = p.run()
+        found = parse_problems(r.stderr, path)
+        if r.status != 0 and found.length == 0 and r.stderr.trim() != "" do
+            found.push(Problem(path, 1, 1, "error", r.stderr.trim().lines()[0]))
+        end
+    else if language == "python" and has("python3") do
+        var p = os.process(["python3", "-c", "import ast,sys\ntry:\n    ast.parse(sys.stdin.read())\nexcept SyntaxError as e:\n    print(str(e.lineno or 1) + ':' + str(e.offset or 1) + ':' + str(e.msg))"])
+        p.input = text
+        p.timeout = 10.0
+        var r = p.run()
+        var parts = r.stdout.trim().split(":")
+        if parts.length >= 3 and is_number(parts[0]) and is_number(parts[1]) do
+            found.push(Problem(path, int(parts[0]), int(parts[1]), "error", parts.slice(2).join(":")))
+        end
+    else if language == "javascript" and has("node") do
+        string file = fs.join(host.scratch, "check-{crypto.random_hex(4)}" + (".mjs" if text.contains("import ") or text.contains("export ") else ".cjs"))
+        fs.write(file, text)
+        var p = os.process(["node", "--check", file])
+        p.timeout = 10.0
+        var r = p.run()
+        fs.remove(file)
+        if r.status != 0 do
+            var lines = r.stderr.lines()
+            int at = 1
+            string message = "syntax error"
+            if lines.length > 0 do
+                var head = lines[0].split(":")
+                if head.length > 1 and is_number(head[head.length - 1]) do
+                    at = int(head[head.length - 1])
+                end
+            end
+            for line in lines do
+                if line.contains("Error:") do
+                    message = line.trim()
+                    break
+                end
+            end
+            found.push(Problem(path, at, 1, "error", message))
+        end
+    end
+    return json.encode(found)
+end
+
+private function format(string text) returns string
+    string file = fs.join(host.scratch, "format-{crypto.random_hex(4)}.fw")
+    fs.write(file, text)
+    var r = os.run([host.compiler, "format", file])
+    string result = fs.read(file)
+    fs.remove(file)
+    if r.status != 0 do
+        throw ValueError(r.stderr.trim())
+    end
+    return result
+end
+
+# Packages --------------------------------------------------------------------------------
+
+private function packages(string root) returns string
+    string manifest = "null"
+    string file = fs.join(root, "pulley.toml")
+    if fs.exists(file) do
+        try
+            manifest = json.stringify(toml.parse(fs.read(file)))
+        catch Error e
+            manifest = "{{\"error\":" + q(e.message) + "}}"
+        end
+    end
+    string[] installed = []
+    string modules = fs.join(root, ".flywheel-modules")
+    if fs.is_dir(modules) do
+        for name in fs.list(modules) do
+            string package = fs.join(modules, name)
+            if name.ends_with(".link") do
+                package = fs.read(package).trim()
+                name = name.slice(0, name.length - 5)
+            end
+            string info = "{{}}"
+            string record = "{{}}"
+            try
+                if fs.exists(fs.join(package, "pulley.toml")) do
+                    info = json.stringify(toml.parse(fs.read(fs.join(package, "pulley.toml"))))
+                end
+                if fs.exists(fs.join(package, ".pulley.json")) do
+                    record = json.stringify(json.parse(fs.read(fs.join(package, ".pulley.json"))))
+                end
+            catch Error e
+                info = "{{}}"
+            end
+            if name.starts_with(".") do
+                continue
+            end
+            installed.push("{{\"name\":" + q(name) + ",\"manifest\":" + info + ",\"record\":" + record + "}}")
+        end
+    end
+    return "{{\"manifest\":" + manifest + ",\"installed\":[" + installed.join(",") + "],\"pulley\":" + json.encode(has("pulley")) + ",\"root\":" + q(root) + "}}"
+end
+
+# Requests --------------------------------------------------------------------------------
+
+private function info() returns string
+    string config = ""
+    if fs.exists(host.config_file) do
+        config = fs.read(host.config_file)
+    end
+    string[] found = []
+    for name in ["python3", "node", "pulley", "git", "cc", "g++", "rustc", "cargo", "go", "java", "ruby", "php", "lua", "bash"] do
+        if has(name) do
+            found.push(name)
+        end
+    end
+    return "{{\"version\":" + q(VERSION) + ",\"root\":" + q(host.root) + ",\"name\":" + q(fs.basename(host.root)) + ",\"home\":" + q(env("HOME")) + ",\"compiler\":" + q(host.compiler) + ",\"config\":" + q(config) + ",\"configPath\":" + q(host.config_file) + ",\"defaultConfig\":" + q(fs.read(fs.join(host.home, "web", "solenoid.cw"))) + ",\"tools\":" + json.encode(found) + ",\"posix\":" + json.encode(fs.exists("/bin/sh")) + "}}"
+end
+
+private function handle(string method, json.value body) returns web.response
+    if method == "info" do
+        return reply(info())
+    else if method == "fs/list" do
+        return reply(list_directory(resolve(text_of(body, "path"))))
+    else if method == "fs/read" do
+        string path = resolve(text_of(body, "path"))
+        if fs.size(path) > MAX_FILE do
+            return failure("the file is larger than {MAX_FILE // 1000000} MB")
+        end
+        string text = fs.read(path)
+        if looks_binary(text) do
+            return reply("{{\"binary\":true,\"size\":{fs.size(path)}}}")
+        end
+        return reply("{{\"text\":" + q(text) + "}}")
+    else if method == "fs/write" do
+        string path = resolve(text_of(body, "path"))
+        if not fs.exists(fs.dirname(path)) do
+            fs.mkdir(fs.dirname(path))
+        end
+        fs.write(path, text_of(body, "text"))
+        return reply("{{\"ok\":true}}")
+    else if method == "fs/mkdir" do
+        fs.mkdir(resolve(text_of(body, "path")))
+        return reply("{{\"ok\":true}}")
+    else if method == "fs/remove" do
+        string path = resolve(text_of(body, "path"))
+        if path == host.root or path == "/" or path == env("HOME") do
+            return failure("refusing to remove " + path)
+        end
+        if fs.is_dir(path) do
+            fs.remove_all(path)
+        else do
+            fs.remove(path)
+        end
+        return reply("{{\"ok\":true}}")
+    else if method == "fs/move" do
+        string to = resolve(text_of(body, "to"))
+        if fs.exists(to) do
+            return failure(fs.basename(to) + " already exists")
+        end
+        fs.move(resolve(text_of(body, "from")), to)
+        return reply("{{\"ok\":true}}")
+    else if method == "fs/copy" do
+        fs.copy(resolve(text_of(body, "from")), resolve(text_of(body, "to")))
+        return reply("{{\"ok\":true}}")
+    else if method == "fs/exists" do
+        string path = resolve(text_of(body, "path"))
+        return reply("{{\"exists\":" + json.encode(fs.exists(path)) + ",\"dir\":" + json.encode(fs.is_dir(path)) + "}}")
+    else if method == "fs/walk" do
+        string[] files = []
+        collect(host.root, "", files, 8000)
+        return reply(json.encode(files))
+    else if method == "search" do
+        return reply(search(text_of(body, "query"), bool_of(body, "case"), 400))
+    else if method == "run/start" do
+        string dir = resolve(text_of(body, "cwd"))
+        if not fs.is_dir(dir) do
+            dir = host.root
+        end
+        map<string, string> variables = {}
+        var job = start_job(list_of(body, "command"), text_of(body, "shell"), dir, variables)
+        return reply("{{\"id\":{job.id}}}")
+    else if method == "run/poll" or method == "run/input" or method == "run/kill" do
+        int id = int_of(body, "id")
+        if not (id in jobs) do
+            return failure("no such program", 404)
+        end
+        var job = jobs[id]
+        if method == "run/input" do
+            fs.append(job.input, text_of(body, "text"))
+        else if method == "run/kill" do
+            stop_job(job)
+        end
+        return reply(job_state(job, int_of(body, "offset")))
+    else if method == "check" do
+        string path = text_of(body, "path")
+        return reply(check(resolve(path) if path != "" else "", text_of(body, "text"), text_of(body, "language")))
+    else if method == "format" do
+        return reply("{{\"text\":" + q(format(text_of(body, "text"))) + "}}")
+    else if method == "packages" do
+        return reply(packages(host.root))
+    else if method == "console/eval" do
+        string name = text_of(body, "session", "main")
+        string mode = text_of(body, "mode", "serve")
+        guard.lock()
+        if not (name in consoles) do
+            var created = driveshaft.Session(mode)
+            created.compiler = host.compiler
+            created.timeout = 30.0
+            consoles[name] = created
+        end
+        var session = consoles[name]
+        guard.unlock()
+        session.mode = mode
+        string code = text_of(body, "code")
+        if code == ":reset" do
+            session.reset()
+            return reply("{{\"status\":0,\"output\":\"\",\"errors\":\"\",\"returned\":\"\",\"value\":\"\",\"unfinished\":false,\"kept\":false}}")
+        end
+        if code == ":show" do
+            return reply("{{\"status\":0,\"output\":" + q(session.source() + "\n") + ",\"errors\":\"\",\"returned\":\"\",\"value\":\"\",\"unfinished\":false,\"kept\":false}}")
+        end
+        if code == ":undo" do
+            session.undo()
+            return reply("{{\"status\":0,\"output\":\"\",\"errors\":\"\",\"returned\":\"\",\"value\":\"\",\"unfinished\":false,\"kept\":false}}")
+        end
+        session.stdin = text_of(body, "stdin")
+        var previous = fs.cwd()
+        return reply(json.encode(session.eval(code, bool_of(body, "force"))))
+    else if method == "config/save" do
+        if not fs.exists(fs.dirname(host.config_file)) do
+            fs.mkdir(fs.dirname(host.config_file))
+        end
+        fs.write(host.config_file, text_of(body, "text"))
+        return reply("{{\"ok\":true}}")
+    else if method == "git" do
+        if not has("git") do
+            return reply("{{\"ok\":false,\"text\":\"\"}}")
+        end
+        var p = os.process(["git", "-C", host.root, "status", "--porcelain=v1", "-b"])
+        p.timeout = 10.0
+        var r = p.run()
+        return reply("{{\"ok\":" + json.encode(r.status == 0) + ",\"text\":" + q(r.stdout) + "}}")
+    else if method == "open" do
+        string url = text_of(body, "url")
+        if url.starts_with("http://") or url.starts_with("https://") do
+            open_browser(url)
+        end
+        return reply("{{\"ok\":true}}")
+    else if method == "root" do
+        string path = resolve(text_of(body, "path"))
+        if not fs.is_dir(path) do
+            return failure(path + " is not a directory")
+        end
+        host.root = path
+        return reply(info())
+    end
+    return failure("unknown request " + method, 404)
+end
+
+private function api(web.request req) returns web.response
+    if not ("x-solenoid-token" in req.headers) or not crypto.secure_equal(req.headers["x-solenoid-token"], host.token) do
+        return failure("not authorized", 403)
+    end
+    try
+        var body = json.parse(req.body if req.body != "" else "{{}}")
+        return handle(req.params["*"], body)
+    catch Error e
+        return failure(e.message, 500)
+    end
+end
+
+const map<string, string> MEDIA = {
+    "html": "text/html; charset=utf-8", "htm": "text/html; charset=utf-8", "css": "text/css; charset=utf-8",
+    "js": "text/javascript; charset=utf-8", "mjs": "text/javascript; charset=utf-8", "json": "application/json",
+    "svg": "image/svg+xml", "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
+    "webp": "image/webp", "ico": "image/x-icon", "txt": "text/plain; charset=utf-8", "md": "text/plain; charset=utf-8",
+    "cw": "text/plain; charset=utf-8", "fw": "text/plain; charset=utf-8", "wasm": "application/wasm",
+    "woff2": "font/woff2", "woff": "font/woff", "mp3": "audio/mpeg", "mp4": "video/mp4", "pdf": "application/pdf"
+}
+
+private function send_file(string path) returns web.response
+    if not fs.is_file(path) do
+        if fs.is_dir(path) and fs.is_file(fs.join(path, "index.html")) do
+            path = fs.join(path, "index.html")
+        else do
+            return web.text("not found", 404)
+        end
+    end
+    var r = web.text(fs.read(path))
+    string extension = fs.extension(path).lower().replace(".", "")
+    r.headers["content-type"] = MEDIA[extension] if extension in MEDIA else "application/octet-stream"
+    r.headers["cache-control"] = "no-store"
+    return r
+end
+
+# The editor's own files.
+private function asset(web.request req) returns web.response
+    string name = req.params["*"]
+    if name.contains("..") do
+        return web.text("not found", 404)
+    end
+    return send_file(fs.join(host.home, "web", name))
+end
+
+# The project's files, for the built-in browser: /project/<token>/<path>.
+private function project_file(web.request req) returns web.response
+    if not crypto.secure_equal(req.params["token"], host.token) do
+        return web.text("not authorized", 403)
+    end
+    string name = req.params["*"]
+    if name.contains("..") do
+        return web.text("not found", 404)
+    end
+    return send_file(fs.join(host.root, name))
+end
+
+private function index(web.request req) returns web.response
+    return send_file(fs.join(host.home, "web", "index.html"))
+end
+
+function open_browser(string url)
+    string[] command = ["xdg-open", url]
+    if not fs.exists("/bin/sh") do
+        command = ["cmd.exe", "/c", "start", "", url]
+    else if not has("xdg-open") and has("open") do
+        command = ["open", url]
+    end
+    try
+        os.start(command, fs.join(host.scratch, "open.log"))
+    catch Error e
+        print "open {url} in a browser"
+    end
+end
+
+private function free_port() returns int
+    var listener = net.listen("127.0.0.1", 0)
+    int port = listener.port()
+    listener.close()
+    return port
+end
+
+private function prepare(string root, int port, string address)
+    host.home = find_home()
+    host.root = fs.absolute(root)
+    host.compiler = driveshaft.find_compiler()
+    host.config_file = config_path()
+    host.port = port
+    host.address = address
+    host.token = env("SOLENOID_TOKEN")
+    if host.token == "" do
+        host.token = crypto.token(24)
+    end
+    host.scratch = fs.join(fs.temp_dir(), "solenoid-{os.pid()}")
+    fs.mkdir(host.scratch)
+end
+
+function url() returns string
+    string shown = host.address
+    if shown == "0.0.0.0" or shown == "::" do
+        shown = "127.0.0.1"
+    end
+    return "http://{shown}:{host.port}/?t={host.token}"
+end
+
+# Ends this host when the window that started it is gone (it may have been killed).
+private function watch(int parent) returns void
+    while true do
+        time.sleep 2
+        bool there = true
+        if fs.exists("/proc/{os.pid()}") do
+            there = fs.exists("/proc/{parent}")
+        else if fs.exists("/bin/sh") do
+            there = os.run(["kill", "-0", string(parent)]).status == 0
+        end
+        if not there do
+            stop_all()
+            os.exit(0)
+        end
+    end
+end
+
+# Serves the editor until interrupted.
+function serve(string root, int port, string address, bool open) returns int
+    prepare(root, port, address)
+    web.workers(4)
+    web.route("GET", "/", index, port, address)
+    web.route("GET", "/project/:token/*", project_file, port, address)
+    web.route("POST", "/api/*", api, port, address)
+    web.route("GET", "/*", asset, port, address)
+    if env("SOLENOID_PARENT") != "" do
+        int parent = int(env("SOLENOID_PARENT"))
+        spawn watch(parent)
+    end
+    print "Solenoid {VERSION}: {host.root}"
+    print "Serving at {url()}"
+    if open do
+        open_browser(url())
+    end
+    try
+        web.wait()
+    finally
+        stop_all()
+    end
+    return 0
+end
+
+# Shows the editor in a desktop window (with its host in a second process), or in the browser
+# when no desktop backend is available.
+function window(string root, bool fall_back) returns int
+    string home = find_home()
+    string token = crypto.token(24)
+    int port = free_port()
+    string log = fs.join(fs.temp_dir(), "solenoid-host-{os.pid()}.log")
+    var p = os.process([driveshaft.find_compiler(), "run", fs.join(home, "cli.fw"), "--", "serve", "--port", string(port), "--no-open", fs.absolute(root)])
+    p.env["SOLENOID_TOKEN"] = token
+    p.env["SOLENOID_HOME"] = home
+    p.env["SOLENOID_PARENT"] = string(os.pid())
+    int child = p.start(log)
+    string address = "http://127.0.0.1:{port}/?t={token}"
+    bool ready = false
+    for attempt in 0..<100 do
+        if not os.alive(child) do
+            break
+        end
+        try
+            var socket = net.connect("127.0.0.1", port, 0.2)
+            socket.close()
+            ready = true
+            break
+        catch NetworkError e
+            time.sleep 0.1
+        end
+    end
+    if not ready do
+        io_error("solenoid: the host did not start:\n" + (fs.read(log) if fs.exists(log) else ""))
+        return 1
+    end
+    int status = 0
+    try
+        var view = desktop.window("Solenoid", 1440, 900)
+        view.load(<html>
+            <head><title>Solenoid</title></head>
+            <body style="margin:0;background:#08080a;overflow:hidden">
+                <iframe src={address} allow="clipboard-read; clipboard-write; fullscreen" style="border:0;position:fixed;inset:0;width:100vw;height:100vh"></iframe>
+            </body>
+        </html>)
+        view.run()
+    catch DesktopError e
+        if not fall_back do
+            io_error("solenoid: " + e.message)
+            status = 1
+        else do
+            print "No desktop window is available here ({e.message})."
+            print "Solenoid is running at {address}"
+            host.scratch = fs.temp_dir()
+            open_browser(address)
+            os.wait(child)
+        end
+    finally
+        if os.alive(child) do
+            os.kill(child)
+        end
+    end
+    return status
+end
+
+private function io_error(string message)
+    var p = os.process(["sh", "-c", "cat >&2"])
+    p.input = message + "\n"
+    p.capture = false
+    p.run()
+end
+
+const string USAGE = "solenoid [desktop|serve] [DIRECTORY or FILE] [--port N] [--host H] [--no-open]
+
+  solenoid              open the IDE in a window (in the browser when there is no desktop backend)
+  solenoid desktop      open the IDE in a window
+  solenoid serve        serve the IDE at http://127.0.0.1:4747/ and open the browser
+  solenoid config       print the path of the settings file (solenoid.cw)
+
+The settings are a Cogwheel file; `Settings` in the IDE opens it."
+
+function main(string[] args) returns int
+    string command = ""
+    string root = "."
+    int port = DEFAULT_PORT
+    string address = "127.0.0.1"
+    bool open = true
+    int i = 0
+    while i < args.length do
+        string a = args[i]
+        if a == "-h" or a == "--help" or a == "help" do
+            print USAGE
+            return 0
+        else if a == "-v" or a == "--version" or a == "version" do
+            print "solenoid " + VERSION
+            return 0
+        else if (a == "serve" or a == "desktop" or a == "config" or a == "s" or a == "d") and command == "" do
+            command = "serve" if a == "s" else ("desktop" if a == "d" else a)
+        else if a == "--no-open" do
+            open = false
+        else if (a == "--port" or a == "-p") and i + 1 < args.length do
+            i += 1
+            port = int(args[i])
+        else if a == "--host" and i + 1 < args.length do
+            i += 1
+            address = args[i]
+        else if a.starts_with("-") do
+            print "solenoid: unknown option " + a
+            print USAGE
+            return 2
+        else do
+            root = a
+        end
+        i += 1
+    end
+    if command == "config" do
+        print config_path()
+        return 0
+    end
+    if fs.is_file(root) do
+        root = fs.dirname(fs.absolute(root))
+    end
+    if not fs.is_dir(root) do
+        print "solenoid: {root} is not a directory"
+        return 2
+    end
+    if command == "serve" do
+        return serve(root, port, address, open)
+    end
+    return window(root, command == "")
+end

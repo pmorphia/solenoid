@@ -1,0 +1,24 @@
+import testing
+import "../solenoid" as solenoid
+
+function test_compiler_messages() returns void
+    var found = solenoid.parse_problems("<source>:3:7: error: undeclared identifier 'nope'\nhelpers.fw:2:1: warning: catch \"X\" never matches: a, b\nFlywheel runtime error: Oops", "main.fw")
+    testing.assert_equal(found.length, 2)
+    testing.assert_equal(found[0].path, "main.fw")
+    testing.assert_equal(found[0].line, 3)
+    testing.assert_equal(found[0].column, 7)
+    testing.assert_equal(found[0].severity, "error")
+    testing.assert_equal(found[1].path, "helpers.fw")
+    testing.assert_equal(found[1].message, "catch \"X\" never matches: a, b")
+end
+
+function test_paths() returns void
+    testing.assert(solenoid.config_path().ends_with("solenoid/solenoid.cw"))
+    testing.assert(solenoid.find_home() != "")
+end
+
+function test_usage() returns void
+    testing.assert_equal(solenoid.main(["--version"]), 0)
+    testing.assert_equal(solenoid.main(["--nope"]), 2)
+    testing.assert_equal(solenoid.main(["serve", "/no/such/directory"]), 2)
+end
