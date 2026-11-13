@@ -200,7 +200,11 @@ class BrowserHost {
         this.persist();
         return { ok: true };
       }
-      case "fs/walk": return [...this.files.keys()].filter(k => !k.startsWith(".flywheel-modules/")).sort();
+      case "fs/walk": {
+        if (!p.path) return [...this.files.keys()].filter(k => !k.startsWith(".flywheel-modules/")).sort();
+        const prefix = p.path + "/";
+        return [...this.files.keys()].filter(k => k.startsWith(prefix)).map(k => k.slice(prefix.length)).filter(k => !k.includes(".flywheel-modules/")).sort();
+      }
       case "search": {
         const matches = [], needle = p.case ? p.query : p.query.toLowerCase();
         let more = false;
@@ -326,7 +330,7 @@ class BrowserHost {
       const text = this.files.get(".flywheel-modules/" + entry.name + "/pulley.toml") || "";
       const pick = key => (new RegExp("^\\s*" + key + "\\s*=\\s*\"(.*)\"", "m").exec(text) || [])[1] || "";
       manifest = { package: { name: pick("name"), author: pick("author"), version: pick("version"), description: pick("description") } };
-      installed.push({ name: entry.name, manifest, record: {} });
+      installed.push({ name: entry.name, path: ".flywheel-modules/" + entry.name, manifest, record: {} });
     }
     return { manifest: this.manifest(), installed, pulley: true, root: "", web: true };
   }

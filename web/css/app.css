@@ -142,6 +142,34 @@ svg.icon { width: 16px; height: 16px; flex: none; fill: none; stroke: currentCol
 .children { overflow: hidden; }
 .anim .children { animation: unfold var(--slow) var(--ease); }
 @keyframes unfold { from { opacity: 0; transform: translateY(-4px); } }
+/* The project view: groups, then modules, packages, and resources. */
+.pgroup { display: flex; align-items: center; gap: 6px; height: 26px; padding-right: 6px; cursor: pointer; user-select: none; white-space: nowrap;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.pgroup:hover { color: var(--dim); }
+.pgroup.sub { height: 24px; font-size: 11px; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--dim); }
+.pgroup.sub:hover { color: var(--fg); background: var(--panel2); }
+.pgroup:not(.sub) + .pgroup:not(.sub), .pnode + .pgroup:not(.sub), .pnote + .pgroup:not(.sub) { margin-top: 6px; }
+.pgroup .chev { width: 12px; height: 12px; flex: none; transition: transform var(--fast) var(--ease); }
+.pgroup.open > .chev { transform: rotate(90deg); }
+.pgroup .label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.pgroup .pcount { font-weight: 500; letter-spacing: 0; color: var(--faint); font-variant-numeric: tabular-nums; }
+.pgroup .pactions { display: flex; opacity: 0; transition: opacity var(--fast); }
+.pgroup:hover .pactions { opacity: 1; }
+.pgroup .pactions button { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 5px; color: var(--dim); }
+.pgroup .pactions button:hover { color: var(--fg); background: var(--panel2); }
+.pgroup .pactions svg.icon { width: 12px; height: 12px; }
+.pnode .chev.none { visibility: hidden; }
+.pnode .kind { width: 16px; height: 16px; border-radius: 4px; display: grid; place-items: center; font-size: 9.5px; font-weight: 700; flex: none; background: var(--panel2); }
+.pnode:hover .kind { background: var(--bg); }
+.kind.module { color: var(--acc); }
+.pnode .picon { width: 16px; height: 16px; display: grid; place-items: center; flex: none; color: var(--s-type); }
+.pnode .picon svg.icon { width: 13px; height: 13px; }
+.pnode .label { flex: 0 1 auto; }
+.pnode .detail { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--faint); font-size: 11px; }
+.pnode .badge { flex: none; font-size: 9.5px; line-height: 15px; padding: 0 5px; border-radius: 4px; color: var(--acc); background: color-mix(in srgb, var(--acc) 14%, transparent); }
+.pnode.private .label { color: var(--faint); }
+.pnode.missing .label { color: var(--faint); font-style: italic; }
+.pnote { height: 22px; line-height: 22px; color: var(--faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 8px; }
 .tree-empty { padding: 14px 12px; color: var(--dim); }
 
 /* ---------------------------------------------------------------- tabs */

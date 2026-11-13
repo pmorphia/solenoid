@@ -550,7 +550,11 @@ private function packages(string root) returns string
             if name.starts_with(".") do
                 continue
             end
-            installed.push("{{\"name\":" + q(name) + ",\"manifest\":" + info + ",\"record\":" + record + "}}")
+            string where = package
+            if where.starts_with(root + "/") do
+                where = where.slice(root.length + 1)
+            end
+            installed.push("{{\"name\":" + q(name) + ",\"path\":" + q(where) + ",\"manifest\":" + info + ",\"record\":" + record + "}}")
         end
     end
     return "{{\"manifest\":" + manifest + ",\"installed\":[" + installed.join(",") + "],\"pulley\":" + json.encode(has("pulley")) + ",\"root\":" + q(root) + "}}"
@@ -623,7 +627,7 @@ private function handle(string method, json.value body) returns web.response
         return reply("{{\"exists\":" + json.encode(fs.exists(path)) + ",\"dir\":" + json.encode(fs.is_dir(path)) + "}}")
     else if method == "fs/walk" do
         string[] files = []
-        collect(host.root, "", files, 8000)
+        collect(resolve(text_of(body, "path")), "", files, 8000)
         return reply(json.encode(files))
     else if method == "search" do
         return reply(search(text_of(body, "query"), bool_of(body, "case"), 400))

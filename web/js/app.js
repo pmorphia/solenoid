@@ -584,10 +584,11 @@ async function saveTab(tab) {
   tab.saved = (tab === active ? view.state : tab.state).doc;
   tab.dirty = false;
   moduleCache.clear();
+  project.symbols.delete(tab.path);
   renderTabs();
   Sound.play("save");
   flashStatus("Saved " + tab.name);
-  if (tab.path !== SETTINGS) { if (!fileList.includes(tab.path)) { fileList.push(tab.path); refreshTree(dirName(tab.path)); } refreshGit(); if (baseName(tab.path) === "pulley.toml") renderPulley(); }
+  if (tab.path !== SETTINGS) { if (!fileList.includes(tab.path)) { fileList.push(tab.path); refreshTree(dirName(tab.path)); } refreshGit(); if (baseName(tab.path) === "pulley.toml") { renderPulley(); refreshProject(); } }
   return true;
 }
 async function saveAll() { for (const tab of tabs) if (tab.dirty) await saveTab(tab); }
@@ -650,6 +651,7 @@ function renderTree() {
   };
   walk("", 0);
   box.replaceChildren(...(rows.length ? rows : [el("div.tree-empty", { text: "This folder is empty. Create a file to begin." })]));
+  renderProject();
 }
 
 async function toggleDir(path) {
@@ -740,6 +742,7 @@ async function afterFileChange(dir) {
   moduleCache.clear();
   await Promise.all([refreshTree(dir), refreshFiles()]);
   refreshGit();
+  refreshProject();
 }
 
 async function refreshGit() {
@@ -762,6 +765,286 @@ async function refreshGit() {
   renderTree();
 }
 
+/* ------------------------------------------------------------------ the project view */
+
+/* The project as Flywheel sees it, beside the folder tree: its modules by the names `import`
+ * gives them (each opening into what it declares), its tests, its Pulley packages (each with
+ * its own modules and files), and every other file as a resource, sorted by kind. Groups are
+ * open until closed (`collapsed`); modules, packages, and classes are closed until opened. */
+const project = {
+  expanded: new Set(), collapsed: new Set(),
+  state: null,                 // the answer to "packages"
+  packageFiles: new Map(),     // package name -> its files, relative to its folder (null while read)
+  symbols: new Map(),          // path -> what the file declares (null while read)
+  filter: "",
+};
+const KIND_LETTERS = { function: "f", method: "f", class: "C", interface: "I", enum: "E", variable: "x", field: "p", constant: "c", heading: "#", rule: "{", component: "<", elements: "<", module: "M" };
+
+const RESOURCE_KINDS = [
+  { id: "project", name: "Project", test: f => /^(pulley\.(toml|lock)|\.gitignore|\.gitattributes|license(\.\w+)?|makefile|cmakelists\.txt|dockerfile)$/i.test(baseName(f)) },
+  { id: "cogwheel", name: "Cogwheel", ext: ["cw"] },
+  { id: "docs", name: "Docs", ext: ["md", "markdown", "txt", "rst", "adoc"] },
+  { id: "web", name: "Web", ext: ["html", "htm", "css", "scss", "less", "js", "mjs", "cjs", "ts", "tsx", "jsx", "svg"] },
+  { id: "data", name: "Data", ext: ["json", "jsonc", "toml", "yaml", "yml", "xml", "csv", "tsv", "ini", "conf", "env", "sql", "lock"] },
+  { id: "native", name: "Native code", ext: ["c", "h", "cpp", "cc", "cxx", "hpp", "hh", "rs", "zig"] },
+  { id: "media", name: "Images and media", ext: ["png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "avif", "mp3", "wav", "ogg", "flac", "mp4", "webm", "mov", "ttf", "otf", "woff", "woff2", "pdf"] },
+  { id: "scripts", name: "Scripts", ext: ["sh", "bash", "zsh", "py", "rb", "lua", "pl", "ps1", "bat"] },
+  { id: "other", name: "Other", test: () => true },
+];
+const resourceKind = path => RESOURCE_KINDS.find(k => k.test ? k.test(path) : k.ext.includes(extension(path)));
+const isModuleFile = path => /\.(fw|fly)$/.test(path);
+const isTestFile = path => /(^|\/)tests?\//.test(path) || /^test_|_test\.(fw|fly)$/.test(baseName(path));
+/* The name `import` loads a project file by, from the project folder. */
+const moduleName = path => path.replace(/\.(fw|fly)$/, "").split("/").join(".");
+const previewable = path => ["html", "htm", "md", "markdown", "cw", "svg"].includes(extension(path)) || resourceKind(path).id === "media";
+const insideProject = path => !path.startsWith("/");
+
+async function refreshProject() {
+  try { project.state = await host.call("packages", {}); packageNames = project.state.installed.map(p => p.name); }
+  catch (e) { project.state = null; }
+  project.packageFiles.clear();
+  project.symbols.clear();
+  renderProject();
+}
+
+/* What a Flywheel file declares: from its tab when it is open, else read once. */
+function declarations(path) {
+  const tab = tabs.find(x => x.path === path);
+  if (tab) return FL.outline(tabText(tab), "flywheel");
+  if (project.symbols.has(path)) return project.symbols.get(path);
+  project.symbols.set(path, null);
+  host.call("fs/read", { path }).then(r => project.symbols.set(path, r.text != null ? FL.outline(r.text, "flywheel") : []), () => project.symbols.set(path, [])).then(renderProject);
+  return null;
+}
+function packageFiles(pkg) {
+  if (project.packageFiles.has(pkg.name)) return project.packageFiles.get(pkg.name);
+  project.packageFiles.set(pkg.name, null);
+  host.call("fs/walk", { path: pkg.path }).then(files => project.packageFiles.set(pkg.name, files.filter(f => !baseName(f).startsWith(".pulley"))), () => project.packageFiles.set(pkg.name, [])).then(renderProject);
+  return null;
+}
+
+const projectShown = () => !$("#sidebar").classList.contains("closed") && !$(".side-view[data-view=project]").hidden;
+
+function renderProject() {
+  if (!projectShown()) return;
+  const box = $("#project-tree"), scroll = box.scrollTop;
+  const filter = project.filter.trim().toLowerCase();
+  const matches = (...texts) => !filter || texts.some(text => text && text.toLowerCase().includes(filter));
+  const rows = [];
+  const flip = (set, id) => { if (set.has(id)) set.delete(id); else set.add(id); Sound.play("tick"); renderProject(); saveSession(); };
+
+  const group = (id, label, count, depth, actions) => {
+    const open = !!filter || !project.collapsed.has(id);
+    rows.push(el("div.pgroup" + (depth ? ".sub" : "") + (open ? ".open" : ""), { style: { paddingLeft: 8 + depth * 14 + "px" }, onclick: () => flip(project.collapsed, id) },
+      el("span.chev", icon("chevron")), el("span.label", { text: label }), count != null ? el("span.pcount", { text: count }) : null,
+      el("span.pactions", (actions || []).map(a => el("button", { title: a.title, onclick: e => { e.stopPropagation(); a.run(); } }, icon(a.icon))))));
+    return open;
+  };
+  const row = o => {
+    const open = o.id && project.expanded.has(o.id);
+    rows.push(el("div.node.pnode" + (open ? ".open" : "") + (o.cls || ""), {
+      style: { paddingLeft: 8 + o.depth * 14 + "px" }, title: o.title || null, "data-path": o.path || null,
+      onclick: o.onclick || (o.id ? () => flip(project.expanded, o.id) : null),
+      oncontextmenu: o.menu ? e => { e.preventDefault(); o.menu(e); } : null },
+      o.id ? el("span.chev", { onclick: e => { e.stopPropagation(); flip(project.expanded, o.id); } }, icon("chevron")) : el("span.chev.none"),
+      o.lead || null, el("span.label", { text: o.label }), o.detail ? el("span.detail", { text: o.detail }) : null,
+      (o.badges || []).map(b => el("span.badge", { text: b })), o.mark ? el("span.mark", { text: o.mark }) : null));
+    return open;
+  };
+  const note = (depth, text) => rows.push(el("div.pnote", { style: { paddingLeft: 8 + depth * 14 + 18 + "px" }, text }));
+  const kindBox = kind => el("span.kind." + kind, { text: KIND_LETTERS[kind] || "·" });
+  const fileMarks = path => {
+    const status = tree.git.get(path) || "";
+    const bad = (problems.get(path) || []).some(p => p.severity !== "warning");
+    return { cls: (active && active.path === path ? ".active" : "") + (status ? ".git-" + status : "") + (bad ? ".has-error" : ""), mark: status };
+  };
+
+  /* A module, opening into its declarations; a class opens into its members. */
+  const moduleRow = (path, name, depth, badges, editable) => {
+    const marks = fileMarks(path);
+    const plain = name.split(".").join("/") + ".fw";
+    const open = row({ id: "m:" + path, depth, path, label: name, detail: path.endsWith(plain) ? "" : path.replace(/^\.flywheel-modules\/[^/]+\//, ""), badges,
+      lead: kindBox("module"), cls: marks.cls, mark: marks.mark, title: path, onclick: () => openFile(path), menu: e => moduleMenu(e, path, name, editable) });
+    if (!open) return;
+    const items = declarations(path);
+    if (items == null) { note(depth + 1, "Reading…"); return; }
+    const top = items.filter(s => !s.container);
+    if (!top.length) note(depth + 1, "Declares nothing yet.");
+    for (const s of top) {
+      const members = ["class", "interface", "enum", "component", "elements"].includes(s.kind) ? items.filter(m => m.container === s.name) : [];
+      const params = /\(([^)]*)\)/.exec(s.detail || "");
+      const id = members.length ? "s:" + path + ":" + s.name : null;
+      const at = item => () => openFile(path, { line: item.line });
+      const shown = row({ id, depth: depth + 1, label: s.name, detail: s.kind === "function" && params ? "(" + params[1].trim() + ")" : "", lead: kindBox(s.kind),
+        cls: s.private ? ".private" : "", title: s.doc ? s.detail + "\n" + s.doc : s.detail, onclick: at(s) });
+      if (shown) for (const m of members) row({ depth: depth + 2, label: m.name, lead: kindBox(m.kind), cls: m.private ? ".private" : "", title: m.detail, onclick: at(m) });
+    }
+  };
+
+  const manifest = project.state && project.state.manifest || null;
+  const own = manifest && manifest.package || {};
+  const mainFile = String(own.main || "").replace(/^\.\//, "");
+  const commandsOf = {};
+  for (const [name, file] of Object.entries(manifest && manifest.commands || {})) (commandsOf[String(file).replace(/^\.\//, "")] = commandsOf[String(file).replace(/^\.\//, "")] || []).push(name);
+  const badgesOf = path => (path === mainFile ? ["main"] : []).concat((commandsOf[path] || []).map(c => "$ " + c));
+  const rank = path => path === mainFile ? 0 : commandsOf[path] ? 1 : 2;
+
+  // Modules.
+  const modules = fileList.filter(f => isModuleFile(f) && !isTestFile(f) && matches(f, moduleName(f)))
+    .sort((a, b) => rank(a) - rank(b) || moduleName(a).localeCompare(moduleName(b)));
+  if ((!filter || modules.length) && group("modules", "Modules", modules.length, 0, [{ icon: "plus", title: "New module", run: () => newModule() }])) {
+    if (!modules.length) note(0, "No Flywheel modules yet.");
+    for (const path of modules) moduleRow(path, moduleName(path), 1, badgesOf(path), true);
+  }
+
+  // Tests.
+  const tests = fileList.filter(f => isModuleFile(f) && isTestFile(f) && matches(f));
+  if (tests.length || !filter) {
+    if (group("tests", "Tests", tests.length, 0, [{ icon: "play", title: "Run the tests", run: () => runActive({ kind: "test" }) }])) {
+      if (!tests.length) note(0, "No tests yet: files in tests/ or named test_*.fw.");
+      for (const path of tests) moduleRow(path, moduleName(path), 1, [], true);
+    }
+  }
+
+  // Packages.
+  const installed = project.state ? project.state.installed : [];
+  const dependencies = manifest && manifest.dependencies || {};
+  const names = [...new Set(Object.keys(dependencies).concat(installed.map(p => p.name)))].sort();
+  const shownPackages = names.filter(name => {
+    const pkg = installed.find(p => p.name === name), meta = pkg && pkg.manifest && pkg.manifest.package || {};
+    const files = pkg && project.packageFiles.get(name);
+    return matches(name, meta.author, meta.description) || (files && files.some(f => matches(f)));
+  });
+  if ((!filter || shownPackages.length) && group("packages", "Packages", shownPackages.length, 0, [{ icon: "package", title: "Pulley: add a package", run: () => showView("pulley") }])) {
+    if (!names.length) note(0, project.state ? "No packages yet." : "Pulley could not be asked.");
+    for (const name of shownPackages) {
+      const pkg = installed.find(p => p.name === name);
+      const meta = pkg && pkg.manifest && pkg.manifest.package || {};
+      const direct = name in dependencies;
+      const id = pkg ? "p:" + name : null;
+      const files = pkg && project.packageFiles.get(name);
+      const forced = filter && files && !matches(name, meta.author, meta.description);
+      if (forced) project.expanded.add(id);
+      const open = row({ id, depth: 1, label: name, detail: pkg ? (meta.version || "") + (meta.author ? " · " + meta.author : "") : "not installed",
+        badges: direct ? [] : ["indirect"], lead: el("span.picon", icon("package")), cls: pkg ? "" : ".missing",
+        title: [(meta.author ? meta.author + "." : "") + name + (meta.version ? "=" + meta.version : ""), meta.description, direct ? "wanted: " + (typeof dependencies[name] === "string" ? dependencies[name] : JSON.stringify(dependencies[name])) : "needed by another package"].filter(Boolean).join("\n"),
+        menu: e => packageMenu(e, name, pkg, direct) });
+      if (!open || !pkg) continue;
+      const all = packageFiles(pkg);
+      if (all == null) { note(2, "Reading…"); continue; }
+      const main = [String(meta.main || "").replace(/^\.\//, ""), name + ".fw", "main.fw", "lib.fw"].find(f => f && all.includes(f));
+      const theirs = all.filter(f => isModuleFile(f) && matches(f, name)).sort((a, b) => (b === main) - (a === main) || a.localeCompare(b));
+      const rest = all.filter(f => !isModuleFile(f) && matches(f, name));
+      const needs = Object.keys(pkg.manifest && pkg.manifest.dependencies || {});
+      if (needs.length) note(2, "Needs " + needs.join(", "));
+      if (theirs.length && group("pm:" + name, "Modules", theirs.length, 2)) {
+        for (const f of theirs) moduleRow(joinPath(pkg.path, f), f === main ? name : name + "." + moduleName(f), 3, f === main ? ["main"] : isTestFile(f) ? ["test"] : [], false);
+      }
+      if (rest.length && group("pr:" + name, "Files", rest.length, 2)) {
+        for (const f of rest) resourceRow(joinPath(pkg.path, f), f, 3, false);
+      }
+      if (!all.length) note(2, "This package is empty.");
+    }
+  }
+
+  // Resources.
+  const resources = fileList.filter(f => !isModuleFile(f) && matches(f));
+  if ((!filter || resources.length) && group("resources", "Resources", resources.length, 0, [{ icon: "file-plus", title: "New file", run: () => newFile("") }])) {
+    if (!resources.length) note(0, "No other files.");
+    for (const kind of RESOURCE_KINDS) {
+      const files = resources.filter(f => resourceKind(f) === kind).sort((a, b) => baseName(a).localeCompare(baseName(b)) || a.localeCompare(b));
+      if (!files.length || !group("r:" + kind.id, kind.name, files.length, 1)) continue;
+      for (const path of files) resourceRow(path, path, 2, true);
+    }
+  }
+
+  function resourceRow(path, shownPath, depth, editable) {
+    const marks = fileMarks(path);
+    row({ depth, path, label: baseName(shownPath), detail: dirName(shownPath), title: path, cls: marks.cls, mark: marks.mark,
+      lead: el("span.dot", { style: { background: UI.fileColor(path) } }),
+      onclick: () => resourceKind(path).id === "media" ? previewFile(path) : openFile(path), menu: e => resourceMenu(e, path, editable) });
+  }
+
+  if (!rows.length) note(0, "Nothing matches " + JSON.stringify(project.filter.trim()) + ".");
+  box.replaceChildren(...rows);
+  box.scrollTop = scroll;
+}
+
+/* A menu without the items that were left out (false) or doubled separators (null). */
+function tidyMenu(items) {
+  const out = [];
+  for (const item of items) {
+    if (item === false || item === undefined) continue;
+    if (item === null && (!out.length || out[out.length - 1] === null)) continue;
+    out.push(item);
+  }
+  while (out.length && out[out.length - 1] === null) out.pop();
+  return out;
+}
+function moduleMenu(event, path, name, editable) {
+  const importable = active && active.language.id === "flywheel" && active.path !== path;
+  menu(event.clientX, event.clientY, tidyMenu([
+    { label: "Open", run: () => openFile(path) },
+    { label: "Run", run: () => openFile(path).then(tab => tab && runActive()) },
+    importable && { label: "Import into " + active.name, run: () => insertImport(name) },
+    null,
+    { label: "Copy import", run: () => copyText("import " + name) },
+    { label: "Copy path", run: () => copyText(path) },
+    insideProject(path) && { label: "Show in Files", run: () => reveal(path) },
+    null,
+    editable && { label: "Rename…", run: () => renamePath(path) },
+    editable && { label: "Duplicate", run: () => duplicatePath(path, false) },
+    editable && { label: "Delete", danger: true, run: () => deletePath(path) },
+  ]));
+}
+function packageMenu(event, name, pkg, direct) {
+  menu(event.clientX, event.clientY, tidyMenu([
+    active && active.language.id === "flywheel" && { label: "Import into " + active.name, run: () => insertImport(name) },
+    { label: "Copy import", run: () => copyText("import " + name) },
+    null,
+    pkg && { label: "Open its pulley.toml", run: () => openFile(joinPath(pkg.path, "pulley.toml")) },
+    pkg && insideProject(pkg.path) && { label: "Show in Files", run: () => reveal(pkg.path) },
+    { label: "Pulley panel", run: () => showView("pulley") },
+    null,
+    direct && { label: "Remove", danger: true, run: () => pulleyCommand(["remove", name], "pulley remove " + name) },
+  ]));
+}
+function resourceMenu(event, path, editable) {
+  menu(event.clientX, event.clientY, tidyMenu([
+    resourceKind(path).id !== "media" && { label: "Open", run: () => openFile(path) },
+    previewable(path) && { label: "Preview", run: () => previewFile(path) },
+    null,
+    { label: "Copy path", run: () => copyText(path) },
+    insideProject(path) && { label: "Show in Files", run: () => reveal(path) },
+    null,
+    editable && { label: "Rename…", run: () => renamePath(path) },
+    editable && { label: "Duplicate", run: () => duplicatePath(path, false) },
+    editable && { label: "Delete", danger: true, run: () => deletePath(path) },
+  ]));
+}
+
+/* A new module, named as `import` names it: `lib.util` is lib/util.fw. */
+async function newModule() {
+  const name = await ask({ title: "New module", text: "Name it as an import does: shapes, or lib.util for lib/util.fw", value: "", placeholder: "lib.util" });
+  if (!name) return;
+  const clean = name.replace(/\.(fw|fly)$/, "");
+  if (!/^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$/.test(clean)) { toast("A module name is words joined by dots, such as lib.util", "error"); return; }
+  const path = clean.split(".").join("/") + ".fw";
+  try {
+    if ((await host.call("fs/exists", { path })).exists) { toast(path + " already exists", "error"); return; }
+    await host.call("fs/write", { path, text: "" });
+  } catch (e) { toast(e.message, "error"); return; }
+  project.expanded.add("m:" + path);
+  await afterFileChange(dirName(path));
+  openFile(path);
+}
+
+$("#project-filter").addEventListener("input", debounce(() => { project.filter = $("#project-filter").value; renderProject(); }, 120));
+$("#project-filter").addEventListener("keydown", e => { if (e.key === "Escape" && e.target.value) { e.target.value = ""; project.filter = ""; renderProject(); e.stopPropagation(); } });
+$("#project-new").onclick = () => newModule();
+$("#project-collapse").onclick = () => { project.expanded.clear(); for (const k of RESOURCE_KINDS) project.collapsed.add("r:" + k.id); renderProject(); saveSession(); };
+$("#project-refresh").onclick = () => afterFileChange();
+
 /* ------------------------------------------------------------------ outline */
 
 let outlineItems = [];
@@ -770,10 +1053,11 @@ const refreshOutline = (() => {
     outlineItems = active ? FL.outline(view.state.doc.toString(), active.language.id) : [];
     const box = $("#outline");
     if (!outlineItems.length) { box.replaceChildren(el("div.empty", { text: active ? "Nothing to outline in this file." : "Open a file to see its outline." })); markOutline(); return; }
-    const letter = { function: "f", method: "f", class: "C", interface: "I", enum: "E", variable: "x", field: "p", constant: "c", heading: "#", rule: "{", component: "<", elements: "<" };
+    const letter = KIND_LETTERS;
     box.replaceChildren(...outlineItems.map(item => el("div.item", { style: { paddingLeft: 12 + (item.depth != null ? item.depth : (item.container ? 1 : 0)) * 14 + "px" }, title: item.detail || item.name, onclick: () => jumpTo(item.line, 1) },
       el("span.kind." + item.kind, { text: letter[item.kind] || "·" }), el("span.name", { text: item.name }))));
     markOutline();
+    if (active && project.expanded.has("m:" + active.path)) renderProject();
   };
   const later = debounce(build, 300);
   return now => now ? build() : later();
@@ -1153,6 +1437,7 @@ function showView(name, toggle) {
   for (const b of $$("#activity button[data-view]")) b.classList.toggle("on", !sidebar.classList.contains("closed") && b.dataset.view === (name || (current && current.dataset.view)));
   if (name === "search") setTimeout(() => $("#search-input").focus());
   if (name === "pulley") renderPulley();
+  if (name === "project") renderProject();
   saveSession();
 }
 for (const button of $$("#activity button[data-view]")) button.onclick = () => showView(button.dataset.view, true);
@@ -1185,7 +1470,7 @@ $("#search-case").addEventListener("change", runSearch);
 
 /* ------------------------------------------------------------------ Pulley */
 
-const KNOWN_PACKAGES = ["polymorphia.cogwheel", "polymorphia.driveshaft", "polymorphia.solenoid", "polymorphia.brace", "polymorphia.clutch", "polymorphia.gearbox"];
+const KNOWN_PACKAGES = ["polymorphia.driveshaft", "polymorphia.solenoid", "polymorphia.brace", "polymorphia.clutch", "polymorphia.gearbox"];
 const registryCache = new Map();
 async function registryInfo(address) {
   const m = /^([\w-]+)\.([\w-]+)$/.exec(address.trim());
@@ -1491,6 +1776,8 @@ command("reveal", "Reveal the file in the tree", () => active && reveal(active.p
 command("copy path", "Copy the file's path", () => active && copyText(active.path), () => active && active.path !== SETTINGS);
 command("pulley", "Pulley: packages", () => showView("pulley"));
 command("outline", "Show the outline", () => showView("outline"));
+command("project", "Show the project: modules, packages, resources", () => showView("project"));
+command("new module", "New module…", () => newModule());
 command("refresh", "Refresh the file tree", () => afterFileChange());
 command("open folder", "Open another folder…", openFolder, () => !isWeb);
 command("import files", "Import files from your computer…", importFiles, () => isWeb);
@@ -1504,7 +1791,7 @@ async function openFolder() {
   await saveAll();
   try { info = await host.call("root", { path }); } catch (e) { toast(e.message, "error"); return; }
   for (const tab of tabs.slice()) if (tab.path !== SETTINGS) await closeTab(tab, true);
-  tree.expanded = new Set([""]); tree.listings.clear(); problems.clear(); terminal.cwd = ""; terminalPrompt();
+  tree.expanded = new Set([""]); tree.listings.clear(); problems.clear(); project.expanded.clear(); project.collapsed.clear(); terminal.cwd = ""; terminalPrompt();
   await startProject();
 }
 function importFiles() {
@@ -1620,6 +1907,7 @@ const saveSession = debounce(() => {
   const data = {
     open: tabs.filter(x => x.path !== SETTINGS).map(x => x.path), active: active ? active.path : null, expanded: [...tree.expanded],
     sidebar: style.getPropertyValue("--sidebar"), panel: style.getPropertyValue("--panel-h"), browser: style.getPropertyValue("--browser"),
+    projectExpanded: [...project.expanded], projectCollapsed: [...project.collapsed],
     sidebarClosed: $("#sidebar").classList.contains("closed"), panelClosed: $("#panel").classList.contains("closed"),
     view: ($$(".side-view").find(v => !v.hidden) || {}).dataset ? $$(".side-view").find(v => !v.hidden).dataset.view : "files", panelTab: currentPanel(),
   };
@@ -1635,10 +1923,12 @@ async function startProject() {
   if (saved.panel) style.setProperty("--panel-h", saved.panel);
   if (saved.browser) style.setProperty("--browser", saved.browser);
   for (const dir of saved.expanded || []) tree.expanded.add(dir);
+  for (const id of saved.projectExpanded || []) project.expanded.add(id);
+  for (const id of saved.projectCollapsed || []) project.collapsed.add(id);
   renderStatus();
   await Promise.all([refreshTree(), refreshFiles()]);
   refreshGit();
-  host.call("packages", {}).then(state => { packageNames = state.installed.map(p => p.name); }, () => {});
+  refreshProject();
   showView(saved.view || "files");
   if (saved.sidebarClosed || innerWidth < 820) $("#sidebar").classList.add("closed");
   showPanel(saved.panelTab && !(isWeb && saved.panelTab === "terminal") ? saved.panelTab : "output");

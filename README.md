@@ -22,6 +22,11 @@ solenoid my-project       # or another one
 - **Editor**: tabs, multiple cursors, find and replace, folding, bracket matching, comment
   toggling, auto-indent, go to line, a file tree with create, rename, duplicate, and delete,
   search across files, an outline, and a session that reopens what you had open.
+- **Project view**: the project as Flywheel sees it, beside the folder tree. Modules by
+  their import names (`lib.util`), each opening into its functions and classes; tests, with
+  Run; Pulley packages, each opening into its own modules and files; and every other file as
+  a resource, sorted by kind. The main module and commands from `pulley.toml` are marked, a
+  filter narrows it all, and a module's menu adds its `import` to the open file.
 - **Highlighting** for Flywheel and Cogwheel, and for Python, JavaScript, TypeScript, HTML,
   CSS, JSON, Markdown, C, C++, Rust, Go, Java, PHP, SQL, XML, YAML, TOML, shell, Lua, Ruby,
   C#, Kotlin, Scala, Dart, Swift, Perl, PowerShell, Dockerfiles, and diffs.

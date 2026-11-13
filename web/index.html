@@ -34,6 +34,7 @@
   <div class="main">
     <nav class="activity" id="activity">
       <button data-view="files" title="Files"><span data-icon="files"></span></button>
+      <button data-view="project" title="Project: modules, packages, resources"><span data-icon="modules"></span></button>
       <button data-view="search" title="Search in files"><span data-icon="search"></span></button>
       <button data-view="pulley" title="Pulley packages"><span data-icon="package"></span></button>
       <button data-view="outline" title="Outline"><span data-icon="outline"></span></button>
@@ -51,6 +52,17 @@
           </span>
         </header>
         <div class="tree" id="tree" tabindex="0"></div>
+      </section>
+      <section class="side-view" data-view="project" hidden>
+        <header><span class="side-title">Project</span>
+          <span class="side-actions">
+            <button id="project-new" title="New module"><span data-icon="file-plus"></span></button>
+            <button id="project-collapse" title="Collapse all"><span data-icon="collapse"></span></button>
+            <button id="project-refresh" title="Refresh"><span data-icon="refresh"></span></button>
+          </span>
+        </header>
+        <div class="search-box"><input id="project-filter" type="text" placeholder="Filter modules, packages, files" spellcheck="false" autocomplete="off"></div>
+        <div class="tree project-tree" id="project-tree" tabindex="0"></div>
       </section>
       <section class="side-view" data-view="search" hidden>
         <header><span class="side-title">Search</span></header>
