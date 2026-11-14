@@ -30,7 +30,9 @@ Check the file for errors while typing, and underline them:
 
 > check while typing = on
 
-Save a changed file after this many seconds without typing (`off` to save only with Ctrl+S):
+Save a changed file of any kind after this many seconds without typing, and every changed
+file when the window loses focus (`off` to save only with Ctrl+S). Running a program saves
+every changed file either way:
 
 > auto save = off
 

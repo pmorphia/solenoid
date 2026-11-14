@@ -19,7 +19,7 @@ import time
 import toml
 import web
 
-const string VERSION = "1.1.0"
+const string VERSION = "2.1.0"
 const int DEFAULT_PORT = 4747
 # Directories left out of file lists and searches.
 const string[] SKIPPED = [".git", "node_modules", ".flywheel-modules", "__pycache__", ".venv", "venv", "target",

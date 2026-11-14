@@ -22,6 +22,9 @@ solenoid my-project       # or another one
 - **Editor**: tabs, multiple cursors, find and replace, folding, bracket matching, comment
   toggling, auto-indent, go to line, a file tree with create, rename, duplicate, and delete,
   search across files, an outline, and a session that reopens what you had open.
+  **Auto save** (`auto save = 2` in the settings) saves every changed file, of any
+  language, a few seconds after you stop typing in it and when the window loses focus; Run
+  saves every changed file first, so a program reads the settings and data you just edited.
 - **Project view**: the project as Flywheel sees it, beside the folder tree. Modules by
   their import names (`lib.util`), each opening into its functions and classes; tests, with
   Run; Pulley packages, each opening into its own modules and files; and every other file as

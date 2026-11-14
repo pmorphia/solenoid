@@ -593,14 +593,21 @@ async function saveTab(tab) {
 }
 async function saveAll() { for (const tab of tabs) if (tab.dirty) await saveTab(tab); }
 
-let autoSaveTimer = null;
+/* Auto save: every changed file, whatever its language, is saved after `auto save` seconds
+   without typing in it. Each file keeps its own timer, so moving to another tab does not drop
+   a pending save, and leaving the window saves every changed file at once. */
+function autoSaveSeconds() { const seconds = Number(setting("Editor", "auto save")); return Number.isFinite(seconds) && seconds > 0 ? seconds : 0; }
+function autoSavable(tab) { return tab && tab.dirty && tab.path !== SETTINGS && tabs.includes(tab); }
 function scheduleAutoSave() {
-  clearTimeout(autoSaveTimer);
-  const seconds = Number(setting("Editor", "auto save"));
-  if (!Number.isFinite(seconds) || seconds <= 0) return;
   const tab = active;
-  autoSaveTimer = setTimeout(() => { if (tab && tab.dirty && tab.path !== SETTINGS) saveTab(tab); }, seconds * 1000);
+  if (!tab) return;
+  clearTimeout(tab.autoSave);
+  const seconds = autoSaveSeconds();
+  if (!seconds) return;
+  tab.autoSave = setTimeout(() => { tab.autoSave = null; if (autoSavable(tab)) saveTab(tab); }, seconds * 1000);
 }
+async function saveChanged() { for (const tab of tabs.slice()) if (autoSavable(tab)) { clearTimeout(tab.autoSave); await saveTab(tab); } }
+addEventListener("blur", () => { if (autoSaveSeconds()) saveChanged(); });
 
 async function formatActive() {
   if (!active) return;
@@ -1305,6 +1312,7 @@ async function runActive(options) {
   if (!tab || tab.path === SETTINGS) { toast("Open a file to run it"); return; }
   if (running) await stopRun();
   if (tab.dirty && !(await saveTab(tab))) return;
+  await saveChanged();   // the modules, settings and data files the program reads
   const language = tab.language.id, text = tabText(tab);
   if (!options.kind && (language === "html" || language === "markdown" || language === "cogwheel")) { previewFile(tab.path); return; }
   const out = $("#output");
