@@ -153,7 +153,7 @@ const LIBRARY = {
     split: ["split(string pattern, string text) returns string[]", ""] }),
   sqlite: M("SQLite 3 databases.", { open: ["open(string path) returns sqlite.database", "execute(sql, values...), query(sql, values...), close()."] }),
   svg: M("SVG tags (`import svg.*`).", {}),
-  testing: M("Assertions for `flywheel test`.", {
+  testing: M("Assertions for `flywheel --test`.", {
     assert: ["assert(bool condition, string message = \"\")", ""], assert_equal: ["assert_equal(actual, expected, string message = \"\")", ""],
     fail: ["fail(string message)", ""], expect_error: ["expect_error(ErrorType, function)", "Requires the function to raise the error; returns it."],
     live_objects: ["live_objects() returns int", ""] }),
@@ -221,7 +221,7 @@ const SNIPPETS = [
   ["enum", "enum ${Name}\n\t${}\nend", "enum declaration"],
   ["interface", "interface ${Name}\n\t${}\nend", "interface declaration"],
   ["test", "function test_${name}() returns void\n\ttesting.assert_equal(${actual}, ${expected})\nend", "test function"],
-  ["page", "import html.*\n\nreturn <html>\n\t<head><title>${Title}</title></head>\n\t<body>\n\t\t<h1>${Hello}</h1>\n\t</body>\n</html>", "a page (flywheel serve / desktop)"],
+  ["page", "import html.*\n\nreturn <html>\n\t<head><title>${Title}</title></head>\n\t<body>\n\t\t<h1>${Hello}</h1>\n\t</body>\n</html>", "a page (flywheel --serve / desktop)"],
   ["lambda", "function(${int x}) => ${x}", "expression lambda"],
   ["main", "function main() returns void\n\t${}\nend\n\nmain()", "main function"],
 ];
@@ -593,7 +593,7 @@ function definition(text, pos) {
   return { line: found.line };
 }
 
-/* Re-indents Flywheel code by block structure (what `flywheel format` does), for the web build. */
+/* Re-indents Flywheel code by block structure (what `flywheel --format` does), for the web build. */
 function format(text, unit) {
   unit = unit || "    ";
   const stack = [];

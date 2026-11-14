@@ -79,9 +79,9 @@ The command that runs a file, by extension. `{file}` is the file, `{dir}` its di
 `{name}` its name without the extension, and `{flywheel}` the Flywheel compiler Solenoid
 itself runs on. Add a line for any other extension.
 
-> fw = {flywheel} run {file}
+> fw = {flywheel} {file}
 
-> fly = {flywheel} run {file}
+> fly = {flywheel} {file}
 
 > py = python3 -u {file}
 
@@ -111,11 +111,11 @@ itself runs on. Add a line for any other extension.
 
 A Flywheel file that returns markup at the top level is a page, and runs with this instead:
 
-> fw page = {flywheel} serve {file} --port 0
+> fw page = {flywheel} --serve {file} --port 0
 
 The command behind the Test button:
 
-> test = {flywheel} test
+> test = {flywheel} --test
 
 ## Browser
 

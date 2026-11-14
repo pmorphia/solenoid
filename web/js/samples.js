@@ -66,7 +66,7 @@ function describe(Circle c) returns string
 end
 `,
   "counter.fw": `# A page: the file returns markup, so F5 opens it in the built-in browser.
-# On your machine, \`flywheel desktop counter.fw\` shows the same page in a window.
+# On your machine, \`flywheel --desktop counter.fw\` shows the same page in a window.
 import html.*
 
 int count = 0

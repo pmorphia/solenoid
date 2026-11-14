@@ -19,7 +19,7 @@ import time
 import toml
 import web
 
-const string VERSION = "1.0.0"
+const string VERSION = "1.1.0"
 const int DEFAULT_PORT = 4747
 # Directories left out of file lists and searches.
 const string[] SKIPPED = [".git", "node_modules", ".flywheel-modules", "__pycache__", ".venv", "venv", "target",
@@ -64,7 +64,7 @@ function env(string name) returns string
 end
 
 # Where this package's files (web/, cli.fw) are: SOLENOID_HOME, the directory of the program
-# `flywheel run` was given, an installed package, or the working directory.
+# `flywheel --run` was given, an installed package, or the working directory.
 function find_home() returns string
     string[] candidates = [env("SOLENOID_HOME")]
     try
@@ -456,7 +456,7 @@ private function check(string path, string text, string language) returns string
         dir = host.root
     end
     if language == "flywheel" do
-        var p = os.process([host.compiler, "check", "-s", text])
+        var p = os.process([host.compiler, "--check", "--source", text])
         p.cwd = dir
         p.timeout = 20.0
         var r = p.run()
@@ -505,7 +505,7 @@ end
 private function format(string text) returns string
     string file = fs.join(host.scratch, "format-{crypto.random_hex(4)}.fw")
     fs.write(file, text)
-    var r = os.run([host.compiler, "format", file])
+    var r = os.run([host.compiler, "--format", file])
     string result = fs.read(file)
     fs.remove(file)
     if r.status != 0 do
@@ -874,7 +874,7 @@ function window(string root, bool fall_back) returns int
     string token = crypto.token(24)
     int port = free_port()
     string log = fs.join(fs.temp_dir(), "solenoid-host-{os.pid()}.log")
-    var p = os.process([driveshaft.find_compiler(), "run", fs.join(home, "cli.fw"), "--", "serve", "--port", string(port), "--no-open", fs.absolute(root)])
+    var p = os.process([driveshaft.find_compiler(), "--run", fs.join(home, "cli.fw"), "--", "serve", "--port", string(port), "--no-open", fs.absolute(root)])
     p.env["SOLENOID_TOKEN"] = token
     p.env["SOLENOID_HOME"] = home
     p.env["SOLENOID_PARENT"] = string(os.pid())

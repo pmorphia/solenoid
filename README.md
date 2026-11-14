@@ -37,11 +37,11 @@ solenoid my-project       # or another one
   Hover shows a declaration or a library function's signature; **F12** or Ctrl+click goes
   to a definition, also in another file.
 - **Errors while you type**, underlined and listed under Problems: Flywheel through the
-  compiler (`flywheel check`, including unsaved text), Python, JavaScript, and JSON.
+  compiler (`flywheel --check`, including unsaved text), Python, JavaScript, and JSON.
 - **Run** (F5) for Flywheel, Python, JavaScript, TypeScript, shell, C, C++, Rust, Go, Ruby,
   PHP, Lua, and Java, with the program's output, its exit status and time, a line for its
   input, and Stop. File positions in the output (`main.fw:3:7`) are links. The commands are
-  settings, so any other language is one line away. **Test** runs `flywheel test`.
+  settings, so any other language is one line away. **Test** runs `flywheel --test`.
 - **Built-in browser**: a Flywheel file that returns markup is served and opened beside the
   code; so is any address a running program prints. HTML, Markdown, and Cogwheel files
   preview there, and you can type an address.
@@ -125,8 +125,8 @@ window needs Flywheel's desktop backend. Windows is untested.
 ## Development
 
 ```sh
-flywheel test tests/                              # the host
-flywheel run cli.fw -- serve --no-open .          # the IDE from this checkout
+flywheel --test tests/                              # the host
+flywheel cli.fw -- serve --no-open .          # the IDE from this checkout
 tools/sync-flywheeljs.sh                          # refresh web/vendor/flywheel.js
 ```
 

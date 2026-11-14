@@ -1290,7 +1290,7 @@ function commandFor(tab, text, kind) {
   const ext = extension(tab.path);
   let template = "";
   if (kind === "test") template = setting("Run", "test");
-  else if (kind === "window") template = "{flywheel} desktop {file}";
+  else if (kind === "window") template = "{flywheel} --desktop {file}";
   else if ((ext === "fw" || ext === "fly") && /^return\s*(?:<|\w+\s*\()/m.test(text) && /import\s+html/.test(text) && /^return\s*</m.test(text)) template = setting("Run", "fw page");
   else template = conf.get("Run", ext) != null ? conf.get("Run", ext) : defaults.get("Run", ext, "");
   if (!template) return "";
@@ -1738,7 +1738,7 @@ command("run", "Run the open file", () => runActive());
 command("run again", "Run the last file again", () => runActive({ again: true }));
 command("stop", "Stop the running program", stopRun, () => !!running);
 command("test", "Run the tests", () => runActive({ kind: "test" }));
-command("run in window", "Run as a desktop window (flywheel desktop)", () => runActive({ kind: "window" }), () => !isWeb && active && active.language.id === "flywheel");
+command("run in window", "Run as a desktop window (flywheel --desktop)", () => runActive({ kind: "window" }), () => !isWeb && active && active.language.id === "flywheel");
 command("preview", "Preview the open file in the browser", () => active && active.path !== SETTINGS && previewFile(active.path), () => active && ["html", "markdown", "cogwheel"].includes(active.language.id));
 command("save", "Save", () => saveTab());
 command("save all", "Save all files", saveAll);
