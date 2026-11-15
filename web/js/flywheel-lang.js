@@ -295,6 +295,8 @@ const mode = {
         return after === "function" ? "variableName.function.definition" : "typeName.definition";
       // `struct Name` alone on its line declares a value type; elsewhere `struct` is a name.
       if (word === "struct" && state.head === "struct" && stream.match(/^\s+[A-Za-z_]\w*\s*(?:#.*)?$/, false)) { state.prev = "kw"; return "keyword"; }
+      // `x is Dog`, and constraints such as `<T is comparable>`, name a type.
+      if (after === "is" && !KW.has(word) && !CO.has(word)) return "typeName";
       if (KW.has(word)) { state.prev = "kw"; return word === "this" || word === "super" ? "self" : "keyword"; }
       if (CO.has(word)) return word === "null" ? "null" : "bool";
       if (TY.has(word)) return "typeName";
