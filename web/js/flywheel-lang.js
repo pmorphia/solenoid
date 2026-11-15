@@ -6,7 +6,7 @@
 const KEYWORDS = ("and as assert attr break case catch class component computed const constructor continue defer destructor " +
   "do elements else end enum error extends finally for function if implements import in interface is match not or " +
   "private protected public reactive readonly return returns run spawn static super this throw try unit unitconv " +
-  "unitns var when which while with").split(" ");
+  "unitns unless var when which while with").split(" ");
 const TYPES = ("bool i8 i16 i32 i64 u8 u16 u32 u64 int float double string void element fragment char array tuple map " +
   "set Result weak Error RuntimeError FileError InputError ProcessError IndexError KeyError NumericError AssertionError " +
   "JsonError ResultError CastError SelectorError DesktopError RegexError NetworkError ValueError HttpError DatabaseError " +
@@ -213,11 +213,14 @@ const SNIPPETS = [
   ["class", "class ${Name}\n\t${}\nend", "class declaration"],
   ["if", "if ${condition} do\n\t${}\nend", "if block"],
   ["ifelse", "if ${condition} do\n\t${}\nelse do\n\t\nend", "if / else"],
+  ["unless", "unless ${condition} do\n\t${}\nend", "unless block (if not)"],
   ["for", "for ${item} in ${items} do\n\t${}\nend", "for loop"],
   ["fori", "for ${i} in 0..<${n} do\n\t${}\nend", "counting loop"],
   ["while", "while ${condition} do\n\t${}\nend", "while loop"],
   ["try", "try\n\t${}\ncatch ${Error} ${e}\n\t\nend", "try / catch"],
   ["match", "match ${value}\n\tcase ${pattern} do\n\t\t${}\n\telse do\n\t\t\nend", "match"],
+  ["matchexpr", "var ${result} = match ${value}\n\tcase ${pattern} => ${}\n\telse => \nend", "match expression"],
+  ["deferwhen", "defer when ${condition} do\n\t${}\nend", "reactive condition checked between statements"],
   ["enum", "enum ${Name}\n\t${}\nend", "enum declaration"],
   ["interface", "interface ${Name}\n\t${}\nend", "interface declaration"],
   ["test", "function test_${name}() returns void\n\ttesting.assert_equal(${actual}, ${expected})\nend", "test function"],
@@ -229,7 +232,7 @@ const SNIPPETS = [
 /* ------------------------------------------------------------------ highlighting */
 
 const WORD = /^[A-Za-z_\u0080-\uffff][\w\u0080-\uffff]*/;
-const OPENS = /^\s*(?:(?:public|private|protected|static|readonly)\s+)*(?:class|interface|enum|elements|component|try|match|constructor|destructor|catch|finally|else|case|defer\s*$)\b|\bdo\s*$|^\s*(?:[\w.]+\s+)*function\s+[\w]+|\bfunction\s*(?:\([^()]*\))?(?:\s*returns\s+[\w<>\[\], .?]+)?\s*$/;
+const OPENS = /^\s*(?:(?:public|private|protected|static|readonly)\s+)*(?:class|interface|enum|elements|component|try|match|constructor|destructor|catch|finally|else|case|defer\s*$)\b|^\s*(?:(?:public|private)\s+)?struct\s+[A-Za-z_]\w*\s*$|\bdo\s*$|(?:^|[\s=(,\[])match\s+(?!.*\bend\b)\S.*$|^\s*(?:[\w.]+\s+)*function\s+[\w]+|\bfunction\s*(?:\([^()]*\))?(?:\s*returns\s+[\w<>\[\], .?]+)?\s*$/;
 
 function stripComment(line) {
   let quote = false;
@@ -251,7 +254,7 @@ const mode = {
   token(stream, state) {
     if (stream.sol() && !state.str) {
       const line = stripComment(stream.string);
-      if (line.trim() !== "") { state.indent = stream.indentation(); state.opens = OPENS.test(line.replace(/\s+$/, "")) && !/=>/.test(line); state.head = (/^\s*(\w+)/.exec(line) || [])[1] || ""; }
+      if (line.trim() !== "") { state.indent = stream.indentation(); state.opens = OPENS.test(line.replace(/\s+$/, "")) && !/=>/.test(line); state.head = (/^\s*(\w+)/.exec(line) || [])[1] || ""; state.match = /(?:^|[\s=(,\[])match\s/.test(line) && !/\bend\b/.test(line); }
     }
     if (state.str && state.interp === 0) return stringBody(stream, state);
     if (stream.eatSpace()) return null;
@@ -279,11 +282,13 @@ const mode = {
       const word = stream.current();
       const after = state.after;
       state.after = word;
-      const wasDot = state.prev === ".";
+      const wasDot = state.prev === ".", wasKeyword = state.prev === "kw";
       state.prev = "word";
       if (wasDot) return stream.peek() === "(" ? "propertyName.function" : "propertyName";
-      if (after === "function" || after === "class" || after === "interface" || after === "enum" || after === "error" || after === "component")
+      if (after === "function" || after === "class" || after === "interface" || after === "enum" || after === "error" || after === "component" || (after === "struct" && wasKeyword))
         return after === "function" ? "variableName.function.definition" : "typeName.definition";
+      // `struct Name` alone on its line declares a value type; elsewhere `struct` is a name.
+      if (word === "struct" && state.head === "struct" && stream.match(/^\s+[A-Za-z_]\w*\s*(?:#.*)?$/, false)) { state.prev = "kw"; return "keyword"; }
       if (KW.has(word)) { state.prev = "kw"; return word === "this" || word === "super" ? "self" : "keyword"; }
       if (CO.has(word)) return word === "null" ? "null" : "bool";
       if (TY.has(word)) return "typeName";
@@ -307,7 +312,7 @@ const mode = {
     const unit = cx.unit;
     let depth = state.indent + (state.opens ? unit : 0);
     const closing = /^\s*(end|else|catch|finally|case)\b/.exec(textAfter);
-    if (closing && !(closing[1] === "case" && state.head === "match")) depth -= unit;
+    if (closing && !(closing[1] === "case" && state.match)) depth -= unit;
     return Math.max(0, depth);
   },
   languageData: {
@@ -617,7 +622,7 @@ function format(text, unit) {
     } else if (/^(else|catch|finally)\b/.test(code)) {
       here = Math.max(0, stack.length - 1);
     } else if (OPENS.test(code) && !/=>/.test(code)) {
-      stack.push(/^match\b/.test(code) ? "match" : "block");
+      stack.push(/(?:^|[\s=(,\[])match\s/.test(code) ? "match" : "block");
     }
     out.push(unit.repeat(here) + line);
     if ((code.match(/(?<!\\)"/g) || []).length % 2) inString = true;
