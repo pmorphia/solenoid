@@ -4,7 +4,7 @@
 "use strict";
 
 const KEYWORDS = ("and as assert attr break case catch class component computed const constructor continue defer destructor " +
-  "do elements else end enum error extends finally for function if implements import in interface is match not or " +
+  "do elements else end enum error extends finally for function if implements import in interface is match not or otherwise " +
   "private protected public reactive readonly return returns run spawn static super this throw try unit unitconv " +
   "unitns unless var when which while with").split(" ");
 const TYPES = ("bool i8 i16 i32 i64 u8 u16 u32 u64 int float double string void element fragment char array tuple map " +
