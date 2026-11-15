@@ -232,7 +232,8 @@ const SNIPPETS = [
 /* ------------------------------------------------------------------ highlighting */
 
 const WORD = /^[A-Za-z_\u0080-\uffff][\w\u0080-\uffff]*/;
-const OPENS = /^\s*(?:(?:public|private|protected|static|readonly)\s+)*(?:class|interface|enum|elements|component|try|match|constructor|destructor|catch|finally|else|case|defer\s*$)\b|^\s*(?:(?:public|private)\s+)?struct\s+[A-Za-z_]\w*\s*$|\bdo\s*$|(?:^|[\s=(,\[])match\s+(?!.*\bend\b)\S.*$|^\s*(?:[\w.]+\s+)*function\s+[\w]+|\bfunction\s*(?:\([^()]*\))?(?:\s*returns\s+[\w<>\[\], .?]+)?\s*$/;
+const DECORATES = /^(?:\.[A-Za-z_]\w*)*(?:\([^()]*\))?[ \t]+(?:[A-Za-z_][\w.]*(?:\([^()]*\))?[ \t]+)*(?:class|function)[ \t]+[A-Za-z_]/;
+const OPENS = /^\s*(?:(?:public|private|protected|static|readonly)\s+)*(?:class|interface|enum|elements|component|try|match|constructor|destructor|catch|finally|else|case|defer\s*$)\b|^\s*(?:(?:public|private)\s+)?struct\s+[A-Za-z_]\w*\s*$|\bdo\s*$|(?:^|[\s=(,\[])match\s+(?!.*\bend\b)\S.*$|^\s*(?:[\w.]+(?:\([^()]*\))?\s+)+class\s+\w+|^\s*(?:[\w.]+(?:\([^()]*\))?\s+)*function\s+[\w]+|\bfunction\s*(?:\([^()]*\))?(?:\s*returns\s+[\w<>\[\], .?]+)?\s*$/;
 
 function stripComment(line) {
   let quote = false;
@@ -284,7 +285,12 @@ const mode = {
       state.after = word;
       const wasDot = state.prev === ".", wasKeyword = state.prev === "kw";
       state.prev = "word";
+      if (wasDot && state.decorator) return "macroName";
       if (wasDot) return stream.peek() === "(" ? "propertyName.function" : "propertyName";
+      state.decorator = false;
+      // Decorators come before `class Name` or `function name` on the same line:
+      // `register class Store`, `logged("db") memoize function fib(int n)`.
+      if (!KW.has(word) && !TY.has(word) && DECORATES.test(stream.string.slice(stream.pos))) { state.decorator = true; return "macroName"; }
       if (after === "function" || after === "class" || after === "interface" || after === "enum" || after === "error" || after === "component" || (after === "struct" && wasKeyword))
         return after === "function" ? "variableName.function.definition" : "typeName.definition";
       // `struct Name` alone on its line declares a value type; elsewhere `struct` is a name.
